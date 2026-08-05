@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 
 void main() {
   runApp(const SmartMedsApp());
@@ -20,9 +21,14 @@ class SmartMedsApp extends StatelessWidget {
   }
 }
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -55,7 +61,14 @@ class HomeScreen extends StatelessWidget {
             SizedBox(
               height: 55,
               child: ElevatedButton.icon(
-                onPressed: () {},
+                onPressed: () {
+  Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (context) => const AddMedicineScreen(),
+    ),
+  );
+},
                 icon: const Icon(Icons.add),
                 label: const Text(
                   "Add Medicine",
@@ -90,6 +103,62 @@ class HomeScreen extends StatelessWidget {
             color: color,
             fontWeight: FontWeight.bold,
           ),
+        ),
+      ),
+    );
+  }
+    }
+class AddMedicineScreen extends StatelessWidget {
+  const AddMedicineScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Add Medicine"),
+        backgroundColor: Colors.blue,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            TextField(
+              decoration: const InputDecoration(
+                labelText: "Medicine Name",
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            TextField(
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: "Number of Tablets",
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            TextField(
+              decoration: const InputDecoration(
+                labelText: "Time (Example: 8:00 AM)",
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 30),
+
+            SizedBox(
+              width: double.infinity,
+              height: 55,
+              child: ElevatedButton(
+                onPressed: () {},
+                child: const Text(
+                  "Save Medicine",
+                  style: TextStyle(fontSize: 18),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
