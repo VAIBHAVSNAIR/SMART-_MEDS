@@ -1,4 +1,7 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const SmartMedsApp());
@@ -32,6 +35,24 @@ class Medicine {
     required this.time,
     this.status = "⏳ Pending",
   });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'name': name,
+      'tablets': tablets,
+      'time': time,
+      'status': status,
+    };
+  }
+
+  factory Medicine.fromJson(Map<String, dynamic> json) {
+    return Medicine(
+      name: json['name'],
+      tablets: json['tablets'],
+      time: json['time'],
+      status: json['status'] ?? "⏳ Pending",
+    );
+  }
 }
 
 class HomeScreen extends StatefulWidget {
@@ -42,35 +63,86 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final List<Medicine> medicines = [
-    Medicine(
-      name: "Paracetamol",
-      tablets: "1",
-      time: "8:00 AM",
-      status: "✅ Taken",
-    ),
-    Medicine(
-      name: "Vitamin D",
-      tablets: "1",
-      time: "1:00 PM",
-    ),
-    Medicine(
-      name: "BP Tablet",
-      tablets: "1",
-      time: "8:00 PM",
-      status: "❌ Missed",
-    ),
-    Medicine(
-      name: "Calcium",
-      tablets: "1",
-      time: "10:00 PM",
-    ),
-  ];
+  List<Medicine> medicines = [];
+
+  @override
+  void initState() {
+    super.initState();
+    loadMedicines();
+  }
+
+  Future<void> loadMedicines() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    final savedMedicines = prefs.getStringList('medicines');
+
+    if (savedMedicines != null && savedMedicines.isNotEmpty) {
+      final loadedMedicines = savedMedicines
+          .map(
+            (medicine) => Medicine.fromJson(
+              jsonDecode(medicine),
+            ),
+          )
+          .toList();
+
+      setState(() {
+        medicines = loadedMedicines;
+      });
+    } else {
+      setState(() {
+        medicines = [
+          Medicine(
+            name: "Paracetamol",
+            tablets: "1",
+            time: "8:00 AM",
+            status: "✅ Taken",
+          ),
+          Medicine(
+            name: "Vitamin D",
+            tablets: "1",
+            time: "1:00 PM",
+          ),
+          Medicine(
+            name: "BP Tablet",
+            tablets: "1",
+            time: "8:00 PM",
+            status: "❌ Missed",
+          ),
+          Medicine(
+            name: "Calcium",
+            tablets: "1",
+            time: "10:00 PM",
+          ),
+        ];
+      });
+
+      await saveMedicines();
+    }
+  }
+
+  Future<void> saveMedicines() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    final savedMedicines = medicines
+        .map(
+          (medicine) => jsonEncode(
+            medicine.toJson(),
+          ),
+        )
+        .toList();
+
+    await prefs.setStringList(
+      'medicines',
+      savedMedicines,
+    );
+  }
 
   void addMedicine(Medicine medicine) {
     setState(() {
       medicines.add(medicine);
     });
+
+    saveMedicines();
   }
 
   @override
@@ -111,10 +183,12 @@ class _HomeScreenState extends State<HomeScreen> {
               height: 55,
               child: ElevatedButton.icon(
                 onPressed: () async {
-                  final newMedicine = await Navigator.push<Medicine>(
+                  final newMedicine =
+                      await Navigator.push<Medicine>(
                     context,
                     MaterialPageRoute(
-                      builder: (context) => const AddMedicineScreen(),
+                      builder: (context) =>
+                          const AddMedicineScreen(),
                     ),
                   );
 
@@ -186,13 +260,20 @@ class AddMedicineScreen extends StatefulWidget {
   const AddMedicineScreen({super.key});
 
   @override
-  State<AddMedicineScreen> createState() => _AddMedicineScreenState();
+  State<AddMedicineScreen> createState() =>
+      _AddMedicineScreenState();
 }
 
-class _AddMedicineScreenState extends State<AddMedicineScreen> {
-  final TextEditingController nameController = TextEditingController();
-  final TextEditingController tabletsController = TextEditingController();
-  final TextEditingController timeController = TextEditingController();
+class _AddMedicineScreenState
+    extends State<AddMedicineScreen> {
+  final TextEditingController nameController =
+      TextEditingController();
+
+  final TextEditingController tabletsController =
+      TextEditingController();
+
+  final TextEditingController timeController =
+      TextEditingController();
 
   @override
   void dispose() {
@@ -203,14 +284,18 @@ class _AddMedicineScreenState extends State<AddMedicineScreen> {
   }
 
   void saveMedicine() {
-    String name = nameController.text.trim();
-    String tablets = tabletsController.text.trim();
-    String time = timeController.text.trim();
+    final name = nameController.text.trim();
+    final tablets = tabletsController.text.trim();
+    final time = timeController.text.trim();
 
-    if (name.isEmpty || tablets.isEmpty || time.isEmpty) {
+    if (name.isEmpty ||
+        tablets.isEmpty ||
+        time.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text("Please fill in all the details."),
+          content: Text(
+            "Please fill in all the details.",
+          ),
         ),
       );
       return;
