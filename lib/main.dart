@@ -14,9 +14,7 @@ class SmartMedsApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Smart Meds',
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
-      ),
+      theme: ThemeData(primarySwatch: Colors.blue),
       home: const HomeScreen(),
     );
   }
@@ -129,6 +127,14 @@ class _HomeScreenState extends State<HomeScreen> {
     saveMedicines();
   }
 
+  void deleteMedicine(int index) {
+    setState(() {
+      medicines.removeAt(index);
+    });
+
+    saveMedicines();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -152,12 +158,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
             const SizedBox(height: 20),
 
-            ...medicines.map(
-              (medicine) => medicineCard(
-                medicine.name,
-                medicine.time,
-                medicine.status,
-                medicine.tablets,
+            ...medicines.asMap().entries.map(
+              (entry) => medicineCard(
+                entry.value,
+                entry.key,
               ),
             ),
 
@@ -193,17 +197,12 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget medicineCard(
-    String name,
-    String time,
-    String status,
-    String tablets,
-  ) {
+  Widget medicineCard(Medicine medicine, int index) {
     Color statusColor = Colors.orange;
 
-    if (status.contains("Taken")) {
+    if (medicine.status.contains("Taken")) {
       statusColor = Colors.green;
-    } else if (status.contains("Missed")) {
+    } else if (medicine.status.contains("Missed")) {
       statusColor = Colors.red;
     }
 
@@ -220,20 +219,35 @@ class _HomeScreenState extends State<HomeScreen> {
           size: 35,
         ),
         title: Text(
-          name,
+          medicine.name,
           style: const TextStyle(
             fontWeight: FontWeight.bold,
           ),
         ),
         subtitle: Text(
-          "⏰ $time  •  💊 $tablets tablet(s)",
+          "⏰ ${medicine.time}  •  💊 ${medicine.tablets} tablet(s)",
         ),
-        trailing: Text(
-          status,
-          style: TextStyle(
-            color: statusColor,
-            fontWeight: FontWeight.bold,
-          ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              medicine.status,
+              style: TextStyle(
+                color: statusColor,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(width: 10),
+            IconButton(
+              icon: const Icon(
+                Icons.delete,
+                color: Colors.red,
+              ),
+              onPressed: () {
+                deleteMedicine(index);
+              },
+            ),
+          ],
         ),
       ),
     );
@@ -277,9 +291,7 @@ class _AddMedicineScreenState
         time.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text(
-            "Please fill in all the details.",
-          ),
+          content: Text("Please fill in all the details."),
         ),
       );
       return;
