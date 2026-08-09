@@ -1,7 +1,6 @@
 import 'dart:convert';
-
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:universal_html/html.dart' as html;
 
 void main() {
   runApp(const SmartMedsApp());
@@ -72,21 +71,15 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> loadMedicines() async {
-    final prefs = await SharedPreferences.getInstance();
-
-    final savedMedicines = prefs.getStringList('medicines');
+    final savedMedicines = html.window.localStorage['medicines'];
 
     if (savedMedicines != null && savedMedicines.isNotEmpty) {
-      final loadedMedicines = savedMedicines
-          .map(
-            (medicine) => Medicine.fromJson(
-              jsonDecode(medicine),
-            ),
-          )
-          .toList();
+      final List<dynamic> decoded = jsonDecode(savedMedicines);
 
       setState(() {
-        medicines = loadedMedicines;
+        medicines = decoded
+            .map((medicine) => Medicine.fromJson(medicine))
+            .toList();
       });
     } else {
       setState(() {
@@ -121,20 +114,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> saveMedicines() async {
-    final prefs = await SharedPreferences.getInstance();
+    final savedMedicines =
+        medicines.map((medicine) => medicine.toJson()).toList();
 
-    final savedMedicines = medicines
-        .map(
-          (medicine) => jsonEncode(
-            medicine.toJson(),
-          ),
-        )
-        .toList();
-
-    await prefs.setStringList(
-      'medicines',
-      savedMedicines,
-    );
+    html.window.localStorage['medicines'] =
+        jsonEncode(savedMedicines);
   }
 
   void addMedicine(Medicine medicine) {
