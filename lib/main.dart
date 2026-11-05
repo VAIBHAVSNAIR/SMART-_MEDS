@@ -1,6 +1,11 @@
 ﻿import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'web_file_export_stub.dart'
+    if (dart.library.html) 'web_file_export_web.dart' as web_file_export;
+
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pdf/pdf.dart';
@@ -324,6 +329,42 @@ class AppSettings {
 class NativeSafetyBridge {
   static const _channel = MethodChannel('smart_meds/safety');
 
+  // Returns false when the Android MainActivity method channel has not been
+  // installed. This prevents a missing native bridge from being misreported
+  // as an ordinary permission denial.
+  static Future<bool> isAvailable() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return false;
+    try {
+      await _channel.invokeMethod<bool>('isSmsPermissionGranted');
+      return true;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return true;
+    }
+  }
+
+  // Android's Storage Access Framework opens a system Save As picker. It does
+  // not need broad storage permission. Returns null on non-Android or when
+  // the native save handler is not installed, allowing the share-sheet fallback.
+  static Future<bool?> saveExportFile({
+    required String fileName,
+    required String mimeType,
+    required Uint8List bytes,
+  }) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return null;
+    try {
+      return await _channel.invokeMethod<bool>('saveExportFile', {
+            'fileName': fileName,
+            'mimeType': mimeType,
+            'bytes': bytes,
+          }) ??
+          false;
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
   static Future<bool> smsPermissionGranted() async {
     try {
       return await _channel.invokeMethod<bool>('isSmsPermissionGranted') ?? false;
@@ -341,15 +382,11 @@ class NativeSafetyBridge {
   }
 
   static Future<bool> sendSms(String phone, String message) async {
-    try {
-      return await _channel.invokeMethod<bool>('sendSms', {
-            'phone': phone,
-            'message': message,
-          }) ??
-          false;
-    } catch (_) {
-      return false;
-    }
+    return await _channel.invokeMethod<bool>('sendSms', {
+          'phone': phone,
+          'message': message,
+        }) ??
+        false;
   }
 
   static Future<bool> scheduleEmergencyAlarm({
@@ -1171,7 +1208,7 @@ class SmartMedsStore extends ChangeNotifier {
 
   Future<void> testSms() async {
     if (settings.emergencyPhone.trim().isEmpty) {
-      throw StateError('Enter the prototype phone number first.');
+      throw StateError('Enter the SMS recipient phone number in Settings first.');
     }
     var permission = await NativeSafetyBridge.smsPermissionGranted();
     if (!permission) {
@@ -1188,7 +1225,7 @@ class SmartMedsStore extends ChangeNotifier {
 
   Future<void> testEmergencyProtocol() async {
     if (settings.emergencyPhone.trim().isEmpty) {
-      throw StateError('Enter the prototype phone number first.');
+      throw StateError('Enter the SMS recipient phone number in Settings first.');
     }
     var permission = await NativeSafetyBridge.smsPermissionGranted();
     if (!permission) {
@@ -2520,15 +2557,6 @@ class _ReportsScreenState extends State<ReportsScreen> {
   bool busy = false;
 
   Future<void> exportCsv() async {
-    if (!widget.store.settings.sharingConsent) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Enable report-sharing consent in Settings before exporting.'),
-        ),
-      );
-      return;
-    }
     final records = widget.store.analytics.inRange(days);
     final out = StringBuffer();
     out.writeln(
@@ -2554,7 +2582,36 @@ class _ReportsScreenState extends State<ReportsScreen> {
     }
 
     final bytes = Uint8List.fromList(utf8.encode(out.toString()));
+    final fileName = 'smart_meds_adherence_${days}days.csv';
     try {
+      if (kIsWeb) {
+        web_file_export.downloadBytes(bytes, fileName, 'text/csv;charset=utf-8');
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('CSV download started: $fileName.')),
+        );
+        return;
+      }
+      final saved = await NativeSafetyBridge.saveExportFile(
+        fileName: fileName,
+        mimeType: 'text/csv',
+        bytes: bytes,
+      );
+      if (!mounted) return;
+      if (saved == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('CSV saved as $fileName.')),
+        );
+        return;
+      }
+      if (saved == false) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Save cancelled. No file was changed.')),
+        );
+        return;
+      }
+
+      // Fallback for web, iOS, desktop, or older Android bridge builds.
       await SharePlus.instance.share(
         ShareParams(
           title: 'Smart Meds CSV report',
@@ -2562,11 +2619,23 @@ class _ReportsScreenState extends State<ReportsScreen> {
           files: [
             XFile.fromData(
               bytes,
-              name: 'smart_meds_adherence.csv',
+              name: fileName,
               mimeType: 'text/csv',
             ),
           ],
-          fileNameOverrides: ['smart_meds_adherence_${days}days.csv'],
+          fileNameOverrides: [fileName],
+        ),
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('CSV export opened in the share menu.')),
+      );
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('CSV save failed: ${e.message ?? e.code}'),
+          backgroundColor: AppColors.danger,
         ),
       );
     } catch (e) {
@@ -2581,21 +2650,49 @@ class _ReportsScreenState extends State<ReportsScreen> {
   }
 
   Future<void> exportPdf() async {
-    if (!widget.store.settings.sharingConsent) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Enable report-sharing consent in Settings before exporting.'),
-        ),
-      );
-      return;
-    }
     setState(() => busy = true);
     try {
       final bytes = await SmartMedsReportPdf(widget.store).build(days);
-      await Printing.sharePdf(
+      final fileName = 'smart_meds_adherence_${days}days.pdf';
+      if (kIsWeb) {
+        web_file_export.downloadBytes(bytes, fileName, 'application/pdf');
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('PDF download started: $fileName.')),
+        );
+        return;
+      }
+      final saved = await NativeSafetyBridge.saveExportFile(
+        fileName: fileName,
+        mimeType: 'application/pdf',
         bytes: bytes,
-        filename: 'smart_meds_adherence_${days}days.pdf',
+      );
+      if (!mounted) return;
+      if (saved == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('PDF saved as $fileName.')),
+        );
+        return;
+      }
+      if (saved == false) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Save cancelled. No file was changed.')),
+        );
+        return;
+      }
+
+      await Printing.sharePdf(bytes: bytes, filename: fileName);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('PDF opened in the print/share menu.')),
+      );
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('PDF save failed: ${e.message ?? e.code}'),
+          backgroundColor: AppColors.danger,
+        ),
       );
     } catch (e) {
       if (!mounted) return;
@@ -2713,7 +2810,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
         const SizedBox(height: 22),
         const SectionHeader(
           title: 'Generate report',
-          subtitle: 'Export exactly what the Data Hub calculates',
+          subtitle: 'Save a PDF or CSV file. No storage permission is required.',
         ),
         const SizedBox(height: 11),
         Container(
@@ -2889,139 +2986,395 @@ class SmartMedsReportPdf {
   SmartMedsReportPdf(this.store);
 
   Future<Uint8List> build(int days) async {
-    final a = store.analytics;
-    final data = a.inRange(days);
+    final analytics = store.analytics;
+    final records = analytics.inRange(days);
     final pdf = pw.Document();
+
+    final medicineGroups = <String, List<DispensingRecord>>{};
+    final dailyGroups = <String, List<DispensingRecord>>{};
+    for (final record in records) {
+      medicineGroups.putIfAbsent(record.medicine, () => []).add(record);
+      final date = _dateLabel(record.scheduledDateTime);
+      dailyGroups.putIfAbsent(date, () => []).add(record);
+    }
+
+    final medicineRows = medicineGroups.entries.toList()
+      ..sort((a, b) => a.key.toLowerCase().compareTo(b.key.toLowerCase()));
+    final dailyRows = dailyGroups.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+
     pdf.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(28),
-        header: (context) => pw.Row(
-          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-          children: [
-            pw.Text(
-              'SMART MEDS',
-              style: pw.TextStyle(
-                fontSize: 18,
-                fontWeight: pw.FontWeight.bold,
+        margin: const pw.EdgeInsets.fromLTRB(30, 34, 30, 34),
+        header: (context) => pw.Container(
+          padding: const pw.EdgeInsets.only(bottom: 9),
+          decoration: const pw.BoxDecoration(
+            border: pw.Border(
+              bottom: pw.BorderSide(color: PdfColors.blue700, width: 1.5),
+            ),
+          ),
+          child: pw.Row(
+            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+            children: [
+              pw.Text(
+                'SMART MEDS',
+                style: pw.TextStyle(
+                  color: PdfColors.blue800,
+                  fontSize: 15,
+                  fontWeight: pw.FontWeight.bold,
+                  letterSpacing: 1.2,
+                ),
               ),
-            ),
-            pw.Text(
-              'PATIENT ADHERENCE REPORT',
-              style: const pw.TextStyle(fontSize: 9),
-            ),
-          ],
+              pw.Text(
+                'PATIENT ADHERENCE REPORT',
+                style: pw.TextStyle(
+                  color: PdfColors.grey700,
+                  fontSize: 8,
+                  fontWeight: pw.FontWeight.bold,
+                  letterSpacing: 0.7,
+                ),
+              ),
+            ],
+          ),
         ),
-        footer: (context) => pw.Align(
-          alignment: pw.Alignment.centerRight,
-          child: pw.Text(
-            'Page ${context.pageNumber} of ${context.pagesCount}',
-            style: const pw.TextStyle(fontSize: 8),
+        footer: (context) => pw.Container(
+          padding: const pw.EdgeInsets.only(top: 8),
+          decoration: const pw.BoxDecoration(
+            border: pw.Border(
+              top: pw.BorderSide(color: PdfColors.grey300, width: 0.7),
+            ),
+          ),
+          child: pw.Row(
+            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+            children: [
+              pw.Text(
+                'SMART MEDS  •  PROTOTYPE REPORT',
+                style: const pw.TextStyle(fontSize: 7, color: PdfColors.grey600),
+              ),
+              pw.Text(
+                'Page ${context.pageNumber} of ${context.pagesCount}',
+                style: const pw.TextStyle(fontSize: 7, color: PdfColors.grey600),
+              ),
+            ],
           ),
         ),
         build: (context) => [
-          pw.SizedBox(height: 16),
+          pw.SizedBox(height: 18),
           pw.Text(
             'Patient Adherence Report',
             style: pw.TextStyle(
-              fontSize: 24,
+              fontSize: 23,
               fontWeight: pw.FontWeight.bold,
+              color: PdfColors.grey900,
             ),
           ),
           pw.SizedBox(height: 5),
-          pw.Text('Patient: ${store.settings.patientName}'),
-          pw.Text('Emergency contact: ${store.settings.emergencyContactName}'),
-          pw.Text('Reporting period: last $days days'),
-          pw.Text('Generated: ${SmartMedsStore.formatDateTime(DateTime.now())}'),
-          pw.SizedBox(height: 18),
-          pw.Table(
-            border: pw.TableBorder.all(color: PdfColors.grey300),
-            children: [
-              _metricRow('Adherence', '${a.adherencePercent(days).toStringAsFixed(0)}%'),
-              _metricRow('Taken doses', '${a.takenCount(days)}'),
-              _metricRow('Missed doses', '${a.missedCount(days)}'),
-              _metricRow('Average late delay', '${a.averageLateMinutes(days).toStringAsFixed(1)} min'),
-              _metricRow('Morning average delay', '${a.morningAverageDelay(days).toStringAsFixed(1)} min'),
-              _metricRow('Most missed day', a.mostMissedDay(days)),
-              _metricRow('Most missed medicine', a.mostMissedMedicine(days)),
-            ],
-          ),
-          pw.SizedBox(height: 18),
           pw.Text(
-            'Dose history',
-            style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold),
+            'A summary of scheduled medicine doses and recorded pickups.',
+            style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey700),
           ),
-          pw.SizedBox(height: 7),
-          pw.TableHelper.fromTextArray(
-            headers: const [
-              'Date',
-              'Medicine',
-              'Time',
-              'Pickup',
-              'Delay',
-              'Status',
-            ],
-            data: data.map((r) {
-              final dt = DateTime.tryParse(r.scheduledDateTime);
-              final date = dt == null ? '' : '${dt.day}/${dt.month}/${dt.year}';
-              return [
-                date,
-                r.medicine,
-                r.scheduledTime,
-                r.dispensedTime.isEmpty ? '-' : r.dispensedTime,
-                '${r.delayMinutes} min',
-                r.status,
-              ];
-            }).toList(),
-            border: pw.TableBorder.all(color: PdfColors.grey300),
-            headerStyle: pw.TextStyle(
-              fontWeight: pw.FontWeight.bold,
-              fontSize: 8,
+          pw.SizedBox(height: 15),
+          _sectionTitle('PATIENT DETAILS'),
+          pw.Container(
+            width: double.infinity,
+            padding: const pw.EdgeInsets.all(12),
+            decoration: pw.BoxDecoration(
+              color: PdfColors.blue50,
+              border: pw.Border.all(color: PdfColors.blue100),
+              borderRadius: pw.BorderRadius.circular(7),
             ),
-            cellStyle: const pw.TextStyle(fontSize: 7.4),
-            cellPadding: const pw.EdgeInsets.all(4),
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                _infoRow('Patient', _safeText(store.settings.patientName)),
+                _infoRow(
+                  'Emergency contact',
+                  _safeText(store.settings.emergencyContactName),
+                ),
+                _infoRow('Reporting period', 'Last $days days'),
+                _infoRow(
+                  'Generated on',
+                  SmartMedsStore.formatDateTime(DateTime.now()),
+                ),
+              ],
+            ),
           ),
-          pw.SizedBox(height: 18),
-          pw.Text(
-            'Safety protocol',
-            style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold),
+          pw.SizedBox(height: 17),
+          _sectionTitle('ADHERENCE OVERVIEW'),
+          pw.Row(
+            crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+            children: [
+              _metricCard(
+                'ADHERENCE',
+                '${analytics.adherencePercent(days).toStringAsFixed(0)}%',
+                PdfColors.blue700,
+              ),
+              pw.SizedBox(width: 7),
+              _metricCard(
+                'DOSES TAKEN',
+                '${analytics.takenCount(days)}',
+                PdfColors.green700,
+              ),
+              pw.SizedBox(width: 7),
+              _metricCard(
+                'DOSES MISSED',
+                '${analytics.missedCount(days)}',
+                PdfColors.red700,
+              ),
+            ],
           ),
-          pw.SizedBox(height: 6),
-          pw.Text(
-            'Configured escalation window: ${store.settings.alertDelayMinutes} minutes. '
-            'The Android safety engine schedules an alarm for a dose when pickup has not been recorded. '
-            'For this prototype, the registered emergency phone can be the developer/tester phone.',
-            style: const pw.TextStyle(fontSize: 9),
+          pw.SizedBox(height: 10),
+          pw.Table(
+            border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.6),
+            columnWidths: {
+              0: const pw.FlexColumnWidth(1),
+              1: const pw.FlexColumnWidth(1),
+            },
+            children: [
+              _detailMetricRow(
+                'Average late delay',
+                '${analytics.averageLateMinutes(days).toStringAsFixed(1)} min',
+              ),
+              _detailMetricRow(
+                'Morning average delay',
+                '${analytics.morningAverageDelay(days).toStringAsFixed(1)} min',
+              ),
+              _detailMetricRow('Most missed day', analytics.mostMissedDay(days)),
+              _detailMetricRow(
+                'Most missed medicine',
+                analytics.mostMissedMedicine(days),
+              ),
+              _detailMetricRow('Best adherence medicine', analytics.bestMedicine(days)),
+            ],
           ),
-          pw.SizedBox(height: 8),
+          pw.SizedBox(height: 17),
+          _sectionTitle('MEDICINE-WISE SUMMARY'),
+          if (medicineRows.isEmpty)
+            _emptyMessage('No dose records were found in this reporting period.')
+          else
+            pw.TableHelper.fromTextArray(
+              headers: const ['Medicine', 'Recorded doses', 'Taken', 'Missed', 'Adherence'],
+              data: medicineRows.map((entry) {
+                final taken = entry.value.where((r) => r.isTaken).length;
+                final missed = entry.value.where((r) => r.isMissed).length;
+                final total = taken + missed;
+                final rate = total == 0 ? '-' : '${(taken * 100 / total).toStringAsFixed(0)}%';
+                return [entry.key, '$total', '$taken', '$missed', rate];
+              }).toList(),
+              border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.6),
+              headerDecoration: const pw.BoxDecoration(color: PdfColors.blue50),
+              headerStyle: pw.TextStyle(
+                fontSize: 7.5,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.blue900,
+              ),
+              cellStyle: const pw.TextStyle(fontSize: 7.5),
+              cellPadding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+              headerAlignment: pw.Alignment.centerLeft,
+              cellAlignment: pw.Alignment.centerLeft,
+            ),
+          pw.SizedBox(height: 17),
+          _sectionTitle('DAILY SUMMARY'),
+          if (dailyRows.isEmpty)
+            _emptyMessage('There is no daily activity to display yet.')
+          else
+            pw.TableHelper.fromTextArray(
+              headers: const ['Date', 'Recorded doses', 'Taken', 'Missed'],
+              data: dailyRows.map((entry) {
+                final taken = entry.value.where((r) => r.isTaken).length;
+                final missed = entry.value.where((r) => r.isMissed).length;
+                return [entry.key, '${entry.value.length}', '$taken', '$missed'];
+              }).toList(),
+              border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.6),
+              headerDecoration: const pw.BoxDecoration(color: PdfColors.blue50),
+              headerStyle: pw.TextStyle(
+                fontSize: 7.5,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.blue900,
+              ),
+              cellStyle: const pw.TextStyle(fontSize: 7.5),
+              cellPadding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+            ),
+          pw.SizedBox(height: 17),
+          _sectionTitle('DETAILED DOSE HISTORY'),
+          if (records.isEmpty)
+            _emptyMessage('No doses were recorded during the selected period.')
+          else
+            pw.TableHelper.fromTextArray(
+              headers: const ['Date', 'Medicine', 'Scheduled', 'Pickup', 'Delay', 'Status'],
+              data: records.map((record) {
+                return [
+                  _dateLabel(record.scheduledDateTime),
+                  record.medicine,
+                  record.scheduledTime,
+                  record.dispensedTime.isEmpty ? '-' : record.dispensedTime,
+                  '${record.delayMinutes} min',
+                  record.status,
+                ];
+              }).toList(),
+              border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
+              headerDecoration: const pw.BoxDecoration(color: PdfColors.blue700),
+              headerStyle: pw.TextStyle(
+                color: PdfColors.white,
+                fontSize: 7,
+                fontWeight: pw.FontWeight.bold,
+              ),
+              cellStyle: const pw.TextStyle(fontSize: 6.8),
+              cellPadding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+              oddRowDecoration: const pw.BoxDecoration(color: PdfColors.grey100),
+            ),
+          pw.SizedBox(height: 17),
+          _sectionTitle('SAFETY PROTOCOL'),
+          pw.Container(
+            width: double.infinity,
+            padding: const pw.EdgeInsets.all(11),
+            decoration: pw.BoxDecoration(
+              color: PdfColors.orange50,
+              border: pw.Border.all(color: PdfColors.orange200),
+              borderRadius: pw.BorderRadius.circular(6),
+            ),
+            child: pw.Text(
+              'Configured escalation window: ${store.settings.alertDelayMinutes} minutes. '
+              'When emergency alerts are enabled, the Android safety engine schedules an alert '
+              'for a dose that has not been recorded as picked up. SMS and email delivery depend '
+              'on the relevant settings, permissions, and configured services. This prototype '
+              'report does not independently verify that a person swallowed a medicine or that '
+              'a physical dispenser released a tablet.',
+              style: const pw.TextStyle(fontSize: 8.2, lineSpacing: 3),
+            ),
+          ),
+          pw.SizedBox(height: 10),
           pw.Text(
-            'This report is a prototype operational record and is not a diagnosis or a substitute for professional medical advice.',
+            'Important: This document is a prototype operational record. It is not a diagnosis, '
+            'does not confirm medication ingestion, and is not a substitute for advice from a '
+            'qualified healthcare professional.',
             style: pw.TextStyle(
-              fontSize: 8,
+              fontSize: 7.5,
+              color: PdfColors.grey700,
               fontStyle: pw.FontStyle.italic,
             ),
           ),
         ],
       ),
     );
+
     return pdf.save();
   }
 
-  pw.TableRow _metricRow(String label, String value) => pw.TableRow(
+  pw.Widget _sectionTitle(String title) => pw.Padding(
+        padding: const pw.EdgeInsets.only(bottom: 7),
+        child: pw.Text(
+          title,
+          style: pw.TextStyle(
+            fontSize: 9,
+            fontWeight: pw.FontWeight.bold,
+            color: PdfColors.blue800,
+            letterSpacing: 0.7,
+          ),
+        ),
+      );
+
+  pw.Widget _infoRow(String label, String value) => pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(vertical: 2),
+        child: pw.Row(
+          children: [
+            pw.SizedBox(
+              width: 112,
+              child: pw.Text(
+                label,
+                style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+              ),
+            ),
+            pw.Expanded(
+              child: pw.Text(
+                value,
+                style: pw.TextStyle(
+                  fontSize: 8.5,
+                  fontWeight: pw.FontWeight.bold,
+                  color: PdfColors.grey900,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+
+  pw.Widget _metricCard(String label, String value, PdfColor accent) =>
+      pw.Expanded(
+        child: pw.Container(
+          padding: const pw.EdgeInsets.all(9),
+          decoration: pw.BoxDecoration(
+            color: PdfColors.grey100,
+            border: pw.Border.all(color: PdfColors.grey300, width: 0.6),
+            borderRadius: pw.BorderRadius.circular(6),
+          ),
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Text(
+                label,
+                style: pw.TextStyle(
+                  fontSize: 6.5,
+                  color: PdfColors.grey700,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              ),
+              pw.SizedBox(height: 5),
+              pw.Text(
+                value,
+                style: pw.TextStyle(
+                  fontSize: 17,
+                  color: accent,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+
+  pw.TableRow _detailMetricRow(String label, String value) => pw.TableRow(
         children: [
           pw.Padding(
-            padding: const pw.EdgeInsets.all(7),
-            child: pw.Text(label),
+            padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: pw.Text(
+              label,
+              style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+            ),
           ),
           pw.Padding(
-            padding: const pw.EdgeInsets.all(7),
+            padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             child: pw.Text(
               value,
-              style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+              style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold),
             ),
           ),
         ],
       );
+
+  pw.Widget _emptyMessage(String message) => pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.all(10),
+        decoration: pw.BoxDecoration(
+          color: PdfColors.grey100,
+          border: pw.Border.all(color: PdfColors.grey300),
+          borderRadius: pw.BorderRadius.circular(5),
+        ),
+        child: pw.Text(
+          message,
+          style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
+        ),
+      );
+
+  String _dateLabel(String raw) {
+    final date = DateTime.tryParse(raw);
+    if (date == null) return '-';
+    return '${date.day.toString().padLeft(2, '0')}/'
+        '${date.month.toString().padLeft(2, '0')}/${date.year}';
+  }
+
+  String _safeText(String value) => value.trim().isEmpty ? 'Not provided' : value.trim();
 }
 
 // ============================================================
@@ -3050,6 +3403,7 @@ class _SettingsScreenState extends State<SettingsScreen>
   bool dataConsent = false;
   bool sharingConsent = false;
   bool smsPermission = false;
+  bool smsBridgeAvailable = false;
   bool exactAlarm = false;
 
   @override
@@ -3087,10 +3441,16 @@ class _SettingsScreenState extends State<SettingsScreen>
   }
 
   Future<void> refreshPermissions() async {
-    final smsValue = await NativeSafetyBridge.smsPermissionGranted();
-    final exactValue = await NativeSafetyBridge.canScheduleExactAlarm();
+    final bridgeAvailable = await NativeSafetyBridge.isAvailable();
+    final smsValue = bridgeAvailable
+        ? await NativeSafetyBridge.smsPermissionGranted()
+        : false;
+    final exactValue = bridgeAvailable
+        ? await NativeSafetyBridge.canScheduleExactAlarm()
+        : false;
     if (!mounted) return;
     setState(() {
+      smsBridgeAvailable = bridgeAvailable;
       smsPermission = smsValue;
       exactAlarm = exactValue;
     });
@@ -3114,91 +3474,193 @@ class _SettingsScreenState extends State<SettingsScreen>
         alertDelayMinutes: 45,
       );
 
-  Future<void> save() async {
+  Future<bool> save({bool showSuccess = true}) async {
     final value = collectSettings();
     final messenger = ScaffoldMessenger.maybeOf(context);
-    if (value.emergencyAlertsEnabled) {
-      if (value.smsEnabled && value.emergencyPhone.isEmpty) {
-        messenger?.showSnackBar(
-          const SnackBar(
-            content: Text('Enter an emergency phone number for automatic SMS.'),
-            backgroundColor: AppColors.danger,
-          ),
-        );
-        return;
-      }
-      if (value.smsEnabled) {
-        final granted = await NativeSafetyBridge.smsPermissionGranted();
-        if (!granted) {
-          await NativeSafetyBridge.requestSmsPermission();
-          final grantedAfterRequest = await NativeSafetyBridge.smsPermissionGranted();
-          if (!grantedAfterRequest) {
-            messenger?.showSnackBar(
-              const SnackBar(
-                content: Text('Grant SMS permission before enabling automatic SMS alerts.'),
-                backgroundColor: AppColors.danger,
-              ),
-            );
-            return;
-          }
-        }
-      }
-      if (value.emailEnabled && value.doctorEmail.isEmpty) {
-        messenger?.showSnackBar(
-          const SnackBar(
-            content: Text('Enter the doctor or healthcare email for email alerts.'),
-            backgroundColor: AppColors.danger,
-          ),
-        );
-        return;
-      }
-      if (value.emailEnabled && value.emailWebhookUrl.isEmpty) {
-        messenger?.showSnackBar(
-          const SnackBar(
-            content: Text('Enter the HTTPS email webhook URL for email alerts.'),
-            backgroundColor: AppColors.danger,
-          ),
-        );
-        return;
-      }
-      if (value.emailEnabled &&
-          !value.emailWebhookUrl.toLowerCase().startsWith('https://')) {
-        messenger?.showSnackBar(
-          const SnackBar(
-            content: Text('Email webhook must use HTTPS.'),
-            backgroundColor: AppColors.danger,
-          ),
-        );
-        return;
-      }
+
+    if (value.emergencyAlertsEnabled &&
+        value.smsEnabled &&
+        value.emergencyPhone.isEmpty) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text('Enter the SMS recipient phone number in the Emergency safety section.'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+      return false;
     }
+    if (value.emailEnabled && value.doctorEmail.isEmpty) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text('Enter the doctor or healthcare email for email alerts.'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+      return false;
+    }
+    if (value.emailEnabled && value.emailWebhookUrl.isEmpty) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text('Enter the HTTPS email webhook URL for email alerts.'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+      return false;
+    }
+    if (value.emailEnabled &&
+        !value.emailWebhookUrl.toLowerCase().startsWith('https://')) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text('Email webhook must use HTTPS.'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+      return false;
+    }
+
+    // Save the phone number and settings before asking Android for permission.
+    // A missing permission must never cause the typed number to be discarded.
     await widget.store.updateSettings(value);
-    if (!mounted) return;
-    messenger?.showSnackBar(
-      const SnackBar(
-        content: Text('Settings saved successfully.'),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    if (!mounted) return false;
+    if (showSuccess) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text('Settings saved successfully.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+    return true;
   }
 
   Future<void> grantSms() async {
-    final before = await NativeSafetyBridge.smsPermissionGranted();
-    if (!before) await NativeSafetyBridge.requestSmsPermission();
-    await Future.delayed(const Duration(milliseconds: 500));
-    await refreshPermissions();
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text('SMS permission is available only in the installed Android app, not in Chrome preview.'),
+        ),
+      );
+      return;
+    }
+    final available = await NativeSafetyBridge.isAvailable();
+    if (!available) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text('Android SMS bridge is missing. Install the Smart Meds MainActivity.kt update and SEND_SMS manifest permission, then rebuild the app.'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+      return;
+    }
+    try {
+      final before = await NativeSafetyBridge.smsPermissionGranted();
+      final granted = before || await NativeSafetyBridge.requestSmsPermission();
+      await refreshPermissions();
+      if (!mounted) return;
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text(granted
+              ? 'SMS permission is granted.'
+              : 'Android did not grant SMS permission. Check the app permission in Android Settings and confirm SEND_SMS is declared in AndroidManifest.xml.'),
+          backgroundColor: granted ? AppColors.success : AppColors.warning,
+        ),
+      );
+    } on PlatformException catch (e) {
+      await refreshPermissions();
+      if (!mounted) return;
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text('Android permission request failed: ${e.message ?? e.code}'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+    } on MissingPluginException {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text('SMS native code is not installed in this Android build. Rebuild the app after updating MainActivity.kt.'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+    }
   }
 
   Future<void> testSms() async {
     final messenger = ScaffoldMessenger.maybeOf(context);
-    await save();
+    final recipient = phone.text.trim();
+    if (recipient.isEmpty) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text('Enter the SMS recipient phone number in the field labelled SMS recipient phone number.'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+      return;
+    }
+
+    // Persist the live TextField value first. Do not let an SMS permission
+    // failure prevent the number from being saved.
+    await widget.store.updateSettings(collectSettings());
+
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text('A SIM-based test SMS can only be sent from the installed Android app. Chrome preview cannot send SMS.'),
+          backgroundColor: AppColors.warning,
+        ),
+      );
+      return;
+    }
+
     try {
-      await widget.store.testSms();
+      final available = await NativeSafetyBridge.isAvailable();
+      if (!available) {
+        throw StateError(
+          'Android SMS bridge is missing. Add the updated MainActivity.kt and SEND_SMS permission to AndroidManifest.xml, then rebuild.',
+        );
+      }
+
+      var granted = await NativeSafetyBridge.smsPermissionGranted();
+      if (!granted) {
+        granted = await NativeSafetyBridge.requestSmsPermission();
+      }
+      await refreshPermissions();
+      if (!granted) {
+        throw StateError(
+          'Android has not granted SEND_SMS. Check Android Settings > Apps > Smart Meds > Permissions, and confirm android.permission.SEND_SMS is in AndroidManifest.xml.',
+        );
+      }
+
+      final sent = await NativeSafetyBridge.sendSms(
+        recipient,
+        'SMART MEDS TEST ALERT\nAutomatic SMS channel is working.',
+      );
+      if (!sent) {
+        throw StateError(
+          'Android could not send the SMS. Check that this phone has an active SIM, SMS service and balance, and that the recipient number is valid.',
+        );
+      }
       if (!mounted) return;
       messenger?.showSnackBar(
         const SnackBar(
-          content: Text('Test SMS sent.'),
+          content: Text('Test SMS sent successfully.'),
           backgroundColor: AppColors.success,
+        ),
+      );
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text('SMS failed: ${e.message ?? e.code}'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+    } on MissingPluginException {
+      if (!mounted) return;
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text('SMS native bridge is not installed in this build. Update MainActivity.kt and rebuild the Android app.'),
+          backgroundColor: AppColors.danger,
         ),
       );
     } catch (e) {
@@ -3214,13 +3676,37 @@ class _SettingsScreenState extends State<SettingsScreen>
 
   Future<void> testAutomaticAlert() async {
     final messenger = ScaffoldMessenger.maybeOf(context);
-    await save();
+    final saved = await save(showSuccess: false);
+    if (!saved) return;
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text('Automatic Android alarms and SMS require the installed Android app, not Chrome preview.'),
+          backgroundColor: AppColors.warning,
+        ),
+      );
+      return;
+    }
     try {
+      final available = await NativeSafetyBridge.isAvailable();
+      if (!available) {
+        throw StateError(
+          'Android safety bridge is missing. Install the native Android files from the Smart Meds fix bundle and rebuild.',
+        );
+      }
       await widget.store.testEmergencyProtocol();
       if (!mounted) return;
       messenger?.showSnackBar(
         const SnackBar(
           content: Text('Automatic safety test scheduled for 1 minute from now.'),
+        ),
+      );
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text('Automatic alert failed: ${e.message ?? e.code}'),
+          backgroundColor: AppColors.danger,
         ),
       );
     } catch (e) {
@@ -3342,8 +3828,9 @@ class _SettingsScreenState extends State<SettingsScreen>
               controller: phone,
               keyboardType: TextInputType.phone,
               decoration: const InputDecoration(
-                labelText: 'Emergency contact phone',
+                labelText: 'SMS recipient phone number',
                 hintText: '+91XXXXXXXXXX',
+                helperText: 'This is the number that receives the test SMS and emergency alerts. The contact name is entered above.',
                 prefixIcon: Icon(Icons.phone_rounded),
               ),
             ),
@@ -3355,9 +3842,11 @@ class _SettingsScreenState extends State<SettingsScreen>
               color: smsPermission
                   ? AppColors.success
                   : AppColors.warning,
-              text: smsPermission
-                  ? 'SMS permission granted'
-                  : 'SMS permission required for automatic SMS',
+              text: !smsBridgeAvailable
+                  ? 'Android SMS bridge not detected (Android app build required)'
+                  : smsPermission
+                      ? 'SMS permission granted'
+                      : 'SMS permission required for automatic SMS',
               actionLabel: 'Grant',
               onPressed: grantSms,
             ),
@@ -3467,7 +3956,7 @@ class _SettingsScreenState extends State<SettingsScreen>
               onChanged: (v) =>
                   setState(() => sharingConsent = v ?? false),
               title: const Text(
-                'I consent to sharing generated reports with registered recipients.',
+                'I consent to automated sharing of generated reports with registered recipients. Manual exports are initiated by me.',
                 style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
               ),
             ),
@@ -3497,7 +3986,7 @@ class _SettingsScreenState extends State<SettingsScreen>
         ),
         const SizedBox(height: 20),
         FilledButton.icon(
-          onPressed: save,
+          onPressed: () => save(),
           icon: const Icon(Icons.save_rounded),
           label: const Text(
             'Save settings',
