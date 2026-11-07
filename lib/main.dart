@@ -2556,96 +2556,103 @@ class _ReportsScreenState extends State<ReportsScreen> {
   int days = 30;
   bool busy = false;
 
-  Future<void> exportCsv() async {
-    final records = widget.store.analytics.inRange(days);
-    final out = StringBuffer();
-    out.writeln(
-      'Date,Medicine,Container,Scheduled time,Pickup time,Delay minutes,Status,Alert triggered',
-    );
-    for (final record in records) {
-      final dt = DateTime.tryParse(record.scheduledDateTime);
-      final date = dt == null
-          ? ''
-          : '${dt.year.toString().padLeft(4, '0')}-'
-              '${dt.month.toString().padLeft(2, '0')}-'
-              '${dt.day.toString().padLeft(2, '0')}';
-      out.writeln([
-        csv(date),
-        csv(record.medicine),
-        csv(record.container),
-        csv(record.scheduledTime),
-        csv(record.dispensedTime),
-        record.delayMinutes,
-        csv(record.status),
-        record.alertTriggered ? 'Yes' : 'No',
-      ].join(','));
-    }
-
-    final bytes = Uint8List.fromList(utf8.encode(out.toString()));
-    final fileName = 'smart_meds_adherence_${days}days.csv';
+  Future<void> exportDetailedPdf() async {
+    setState(() => busy = true);
     try {
+      final records = widget.store.analytics.inRange(days);
+      final pdf = pw.Document();
+      String dateLabel(String raw) {
+        final value = DateTime.tryParse(raw);
+        if (value == null) return raw;
+        return '${value.day.toString().padLeft(2, '0')}/'
+            '${value.month.toString().padLeft(2, '0')}/'
+            '${value.year}';
+      }
+
+      pdf.addPage(
+        pw.MultiPage(
+          pageFormat: PdfPageFormat.a4.landscape,
+          margin: const pw.EdgeInsets.fromLTRB(28, 30, 28, 30),
+          header: (context) => pw.Container(
+            padding: const pw.EdgeInsets.only(bottom: 8),
+            decoration: const pw.BoxDecoration(
+              border: pw.Border(bottom: pw.BorderSide(color: PdfColors.blue700, width: 1.3)),
+            ),
+            child: pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+              children: [
+                pw.Text('SMART MEDS', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, color: PdfColors.blue800)),
+                pw.Text('DETAILED DOSE HISTORY', style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold, color: PdfColors.grey700)),
+              ],
+            ),
+          ),
+          footer: (context) => pw.Container(
+            alignment: pw.Alignment.centerRight,
+            padding: const pw.EdgeInsets.only(top: 7),
+            child: pw.Text('Page ${context.pageNumber} of ${context.pagesCount}', style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey600)),
+          ),
+          build: (context) => [
+            pw.SizedBox(height: 14),
+            pw.Text('Detailed Dose History', style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold, color: PdfColors.grey900)),
+            pw.SizedBox(height: 5),
+            pw.Text('Patient: ${widget.store.settings.patientName.isEmpty ? 'Not specified' : widget.store.settings.patientName}', style: const pw.TextStyle(fontSize: 9)),
+            pw.Text('Period: Last $days days    |    Generated: ${SmartMedsStore.formatDateTime(DateTime.now())}', style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey700)),
+            pw.SizedBox(height: 14),
+            if (records.isEmpty)
+              pw.Container(padding: const pw.EdgeInsets.all(12), color: PdfColors.grey100, child: pw.Text('No dose records were found in this reporting period.'))
+            else
+              pw.TableHelper.fromTextArray(
+                headers: const ['Date', 'Medicine', 'Container', 'Scheduled time', 'Pickup time', 'Delay (min)', 'Status', 'Alert triggered'],
+                data: records.map((record) => [
+                  dateLabel(record.scheduledDateTime),
+                  record.medicine,
+                  record.container,
+                  record.scheduledTime,
+                  record.dispensedTime.isEmpty ? '-' : record.dispensedTime,
+                  '${record.delayMinutes}',
+                  record.status,
+                  record.alertTriggered ? 'Yes' : 'No',
+                ]).toList(),
+                border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
+                headerDecoration: const pw.BoxDecoration(color: PdfColors.blue700),
+                headerStyle: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold, color: PdfColors.white),
+                cellStyle: const pw.TextStyle(fontSize: 8),
+                cellPadding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                oddRowDecoration: const pw.BoxDecoration(color: PdfColors.grey100),
+              ),
+            pw.SizedBox(height: 12),
+            pw.Text('Note: This prototype records scheduled doses and pickup events. A recorded pickup does not independently confirm that medicine was swallowed.', style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700)),
+          ],
+        ),
+      );
+
+      final bytes = await pdf.save();
+      final fileName = 'smart_meds_dose_history_${days}days.pdf';
       if (kIsWeb) {
-        web_file_export.downloadBytes(bytes, fileName, 'text/csv;charset=utf-8');
+        web_file_export.downloadBytes(bytes, fileName, 'application/pdf');
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('CSV download started: $fileName.')),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Detailed PDF download started: $fileName.')));
         return;
       }
-      final saved = await NativeSafetyBridge.saveExportFile(
-        fileName: fileName,
-        mimeType: 'text/csv',
-        bytes: bytes,
-      );
+      final saved = await NativeSafetyBridge.saveExportFile(fileName: fileName, mimeType: 'application/pdf', bytes: bytes);
       if (!mounted) return;
       if (saved == true) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('CSV saved as $fileName.')),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Detailed PDF saved as $fileName.')));
         return;
       }
       if (saved == false) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Save cancelled. No file was changed.')),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Save cancelled. No file was changed.')));
         return;
       }
-
-      // Fallback for web, iOS, desktop, or older Android bridge builds.
-      await SharePlus.instance.share(
-        ShareParams(
-          title: 'Smart Meds CSV report',
-          subject: 'Smart Meds Patient Adherence Report',
-          files: [
-            XFile.fromData(
-              bytes,
-              name: fileName,
-              mimeType: 'text/csv',
-            ),
-          ],
-          fileNameOverrides: [fileName],
-        ),
-      );
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('CSV export opened in the share menu.')),
-      );
+      await Printing.sharePdf(bytes: bytes, filename: fileName);
     } on PlatformException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('CSV save failed: ${e.message ?? e.code}'),
-          backgroundColor: AppColors.danger,
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Detailed PDF save failed: ${e.message ?? e.code}'), backgroundColor: AppColors.danger));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('CSV export failed: $e'),
-          backgroundColor: AppColors.danger,
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Detailed PDF export failed: $e'), backgroundColor: AppColors.danger));
+    } finally {
+      if (mounted) setState(() => busy = false);
     }
   }
 
@@ -2705,13 +2712,6 @@ class _ReportsScreenState extends State<ReportsScreen> {
     } finally {
       if (mounted) setState(() => busy = false);
     }
-  }
-
-  String csv(String value) {
-    if (value.contains(',') || value.contains('"') || value.contains('\n')) {
-      return '"${value.replaceAll('"', '""')}"';
-    }
-    return value;
   }
 
   @override
@@ -2810,7 +2810,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
         const SizedBox(height: 22),
         const SectionHeader(
           title: 'Generate report',
-          subtitle: 'Save a PDF or CSV file. No storage permission is required.',
+          subtitle: 'Export a presentation-ready summary or a detailed dose-history PDF.',
         ),
         const SizedBox(height: 11),
         Container(
@@ -2838,9 +2838,9 @@ class _ReportsScreenState extends State<ReportsScreen> {
               const Divider(height: 14),
               _ReportAction(
                 icon: Icons.table_chart_rounded,
-                title: 'Adherence CSV dataset',
-                subtitle: 'Machine-readable event history for analysis',
-                onPressed: busy ? null : exportCsv,
+                title: 'Detailed Dose History PDF',
+                subtitle: 'All recorded doses in a clear, landscape PDF table',
+                onPressed: busy ? null : exportDetailedPdf,
               ),
               if (busy) ...[
                 const SizedBox(height: 14),
@@ -2888,7 +2888,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
         const SizedBox(height: 22),
         const SectionHeader(
           title: 'Included data',
-          subtitle: 'The CSV and PDF are based on these fields',
+          subtitle: 'Both PDF reports include these recorded fields',
         ),
         const SizedBox(height: 10),
         Wrap(
@@ -3103,7 +3103,9 @@ class SmartMedsReportPdf {
           pw.SizedBox(height: 17),
           _sectionTitle('ADHERENCE OVERVIEW'),
           pw.Row(
-            crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+            // Avoid stretching children vertically inside a MultiPage flow.
+            // The PDF layout engine can otherwise calculate an unbounded height.
+            crossAxisAlignment: pw.CrossAxisAlignment.center,
             children: [
               _metricCard(
                 'ADHERENCE',
@@ -3591,22 +3593,63 @@ class _SettingsScreenState extends State<SettingsScreen>
     if (recipient.isEmpty) {
       messenger?.showSnackBar(
         const SnackBar(
-          content: Text('Enter the SMS recipient phone number in the field labelled SMS recipient phone number.'),
+          content: Text('Enter the SMS recipient phone number first.'),
           backgroundColor: AppColors.danger,
         ),
       );
       return;
     }
 
-    // Persist the live TextField value first. Do not let an SMS permission
-    // failure prevent the number from being saved.
-    await widget.store.updateSettings(collectSettings());
-
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+    final digits = recipient.replaceAll(RegExp(r'[^0-9]'), '');
+    if (digits.length < 8) {
       messenger?.showSnackBar(
         const SnackBar(
-          content: Text('A SIM-based test SMS can only be sent from the installed Android app. Chrome preview cannot send SMS.'),
-          backgroundColor: AppColors.warning,
+          content: Text('Enter a valid phone number, including the country code.'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+      return;
+    }
+
+    // Save the number typed into the field before preparing the test message.
+    await widget.store.updateSettings(collectSettings());
+    if (!mounted) return;
+
+    const message =
+        'SMART MEDS TEST ALERT\n'
+        'This is a test notification from the Smart Meds medicine reminder prototype.';
+
+    // Chrome on Windows has no SIM and cannot send an SMS through Android's
+    // SEND_SMS permission. Prepare the message for the user to send manually.
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      await Clipboard.setData(const ClipboardData(text: message));
+      if (!mounted) return;
+
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Test SMS prepared'),
+          content: SelectableText(
+            'Recipient: $recipient\n\n'
+            '$message\n\n'
+            'The message has been copied. Open Phone Link or your connected '
+            'messaging app, choose the recipient, paste the message and press '
+            'Send. Chrome has prepared the SMS but has not sent it.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Close'),
+            ),
+            FilledButton.icon(
+              onPressed: () async {
+                await Clipboard.setData(const ClipboardData(text: message));
+                if (dialogContext.mounted) Navigator.pop(dialogContext);
+              },
+              icon: const Icon(Icons.copy_rounded),
+              label: const Text('Copy message'),
+            ),
+          ],
         ),
       );
       return;
@@ -3616,7 +3659,8 @@ class _SettingsScreenState extends State<SettingsScreen>
       final available = await NativeSafetyBridge.isAvailable();
       if (!available) {
         throw StateError(
-          'Android SMS bridge is missing. Add the updated MainActivity.kt and SEND_SMS permission to AndroidManifest.xml, then rebuild.',
+          'Android SMS bridge is missing. Update MainActivity.kt and '
+          'AndroidManifest.xml, then rebuild the Android app.',
         );
       }
 
@@ -3627,17 +3671,16 @@ class _SettingsScreenState extends State<SettingsScreen>
       await refreshPermissions();
       if (!granted) {
         throw StateError(
-          'Android has not granted SEND_SMS. Check Android Settings > Apps > Smart Meds > Permissions, and confirm android.permission.SEND_SMS is in AndroidManifest.xml.',
+          'Android has not granted SEND_SMS permission. Check the app '
+          'permissions and AndroidManifest.xml.',
         );
       }
 
-      final sent = await NativeSafetyBridge.sendSms(
-        recipient,
-        'SMART MEDS TEST ALERT\nAutomatic SMS channel is working.',
-      );
+      final sent = await NativeSafetyBridge.sendSms(recipient, message);
       if (!sent) {
         throw StateError(
-          'Android could not send the SMS. Check that this phone has an active SIM, SMS service and balance, and that the recipient number is valid.',
+          'Android could not send the SMS. Check the SIM, SMS service and '
+          'recipient number.',
         );
       }
       if (!mounted) return;
@@ -3659,7 +3702,7 @@ class _SettingsScreenState extends State<SettingsScreen>
       if (!mounted) return;
       messenger?.showSnackBar(
         const SnackBar(
-          content: Text('SMS native bridge is not installed in this build. Update MainActivity.kt and rebuild the Android app.'),
+          content: Text('SMS native bridge is not installed in this Android build.'),
           backgroundColor: AppColors.danger,
         ),
       );
@@ -3842,13 +3885,25 @@ class _SettingsScreenState extends State<SettingsScreen>
               color: smsPermission
                   ? AppColors.success
                   : AppColors.warning,
-              text: !smsBridgeAvailable
-                  ? 'Android SMS bridge not detected (Android app build required)'
-                  : smsPermission
-                      ? 'SMS permission granted'
-                      : 'SMS permission required for automatic SMS',
-              actionLabel: 'Grant',
-              onPressed: grantSms,
+              text: kIsWeb
+                  ? 'Chrome mode: prepare and copy SMS for manual sending'
+                  : !smsBridgeAvailable
+                      ? 'Android SMS bridge not detected (Android app build required)'
+                      : smsPermission
+                          ? 'SMS permission granted'
+                          : 'SMS permission required for automatic SMS',
+              actionLabel: kIsWeb ? 'Manual' : 'Grant',
+              onPressed: kIsWeb
+                  ? () {
+                      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Use Prepare test SMS below. Chrome cannot send an SMS directly.',
+                          ),
+                        ),
+                      );
+                    }
+                  : grantSms,
             ),
             SwitchListTile.adaptive(
               contentPadding: EdgeInsets.zero,
@@ -3903,7 +3958,7 @@ class _SettingsScreenState extends State<SettingsScreen>
               child: OutlinedButton.icon(
                 onPressed: testSms,
                 icon: const Icon(Icons.sms_rounded),
-                label: const Text('Send test SMS now'),
+                label: Text(kIsWeb ? 'Prepare test SMS' : 'Send test SMS now'),
               ),
             ),
             const SizedBox(height: 8),
